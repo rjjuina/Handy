@@ -101,8 +101,6 @@ in
       }
     ];
 
-    environment.systemPackages = [ cfg.package ];
-
     system.activationScripts.postActivation.text = lib.mkAfter ''
       handy_uid=$(/usr/bin/id -u ${lib.escapeShellArg cfg.user})
       /bin/launchctl asuser "$handy_uid" \
