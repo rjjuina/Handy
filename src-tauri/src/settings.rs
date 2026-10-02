@@ -859,7 +859,7 @@ pub fn get_default_settings() -> AppSettings {
     #[cfg(target_os = "windows")]
     let default_shortcut = "ctrl+space";
     #[cfg(target_os = "macos")]
-    let default_shortcut = "option+space";
+    let default_shortcut = "command_right";
     #[cfg(target_os = "linux")]
     let default_shortcut = "ctrl+space";
     #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
@@ -907,10 +907,20 @@ pub fn get_default_settings() -> AppSettings {
         },
     );
 
+    #[cfg(target_os = "macos")]
+    let (selected_model, onboarding_completed, shortcut_activation) = (
+        "handy-computer/whisper-large-v3-gguf/whisper-large-v3-F16.gguf".to_string(),
+        true,
+        ShortcutActivation::PushToTalk,
+    );
+    #[cfg(not(target_os = "macos"))]
+    let (selected_model, onboarding_completed, shortcut_activation) =
+        (String::new(), false, ShortcutActivation::default());
+
     AppSettings {
         settings_schema_version: default_settings_schema_version(),
         bindings,
-        shortcut_activation: ShortcutActivation::default(),
+        shortcut_activation,
         hold_threshold_ms: default_hold_threshold_ms(),
         audio_feedback: false,
         audio_feedback_volume: default_audio_feedback_volume(),
@@ -920,8 +930,8 @@ pub fn get_default_settings() -> AppSettings {
         update_checks_enabled: default_update_checks_enabled(),
         show_whats_new_on_update: default_show_whats_new_on_update(),
         whats_new_last_seen_version: default_whats_new_last_seen_version(),
-        selected_model: "".to_string(),
-        onboarding_completed: false,
+        selected_model,
+        onboarding_completed,
         always_on_microphone: false,
         selected_microphone: None,
         selected_channel: None,
@@ -1241,6 +1251,27 @@ pub fn get_recording_retention_period(app: &AppHandle) -> RecordingRetentionPeri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_defaults_use_right_command_push_to_talk() {
+        let settings = get_default_settings();
+        let transcribe = settings.bindings.get("transcribe").unwrap();
+
+        assert_eq!(transcribe.current_binding, "command_right");
+        assert_eq!(
+            settings.keyboard_implementation,
+            KeyboardImplementation::HandyKeys
+        );
+        assert_eq!(settings.shortcut_activation, ShortcutActivation::PushToTalk);
+        assert_eq!(
+            settings.selected_model,
+            "handy-computer/whisper-large-v3-gguf/whisper-large-v3-F16.gguf"
+        );
+        assert!(settings.onboarding_completed);
+        assert_eq!(settings.selected_language, "auto");
+        assert!(!settings.translate_to_english);
+    }
 
     #[test]
     fn stored_binding_returns_the_requested_binding() {

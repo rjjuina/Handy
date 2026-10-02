@@ -24,15 +24,22 @@
       supportedSystems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
       ];
       forAllSystems = nixpkgs.lib.genAttrs supportedSystems;
       # Read version from Cargo.toml
       cargoToml = fromTOML (builtins.readFile ./src-tauri/Cargo.toml);
       version = cargoToml.package.version;
+      whisperLargeV3F16 = {
+        filename = "whisper-large-v3-F16.gguf";
+        repo = "handy-computer/whisper-large-v3-gguf";
+        revision = "e3e29bee6389c7da4a141406f07bb80ddac5337c";
+        sha256 = "e633ab1d74b0e98f4f57daedaee34291297dbbf01389bda3d890766600c1c584";
+      };
 
       # Shared native library dependencies for both package build and dev shell.
       # Keep in sync: if a native dep is needed for compilation, add it here.
-      commonNativeDeps = pkgs: with pkgs; [
+      linuxNativeDeps = pkgs: with pkgs; [
         webkitgtk_4_1
         gtk3
         glib
@@ -84,8 +91,25 @@
               "${pkgs.alsa-plugins}/lib/alsa-lib"
             ];
           };
+          tauriXattrShim = pkgs.writeShellApplication {
+            name = "xattr";
+            text = ''
+              if [ "$#" -eq 2 ] && [ "$1" = "-cr" ]; then
+                exit 0
+              fi
+
+              echo "xattr shim only permits: xattr -cr <app-bundle>" >&2
+              exit 64
+            '';
+          };
         in
         {
+          whisper-large-v3-f16 = pkgs.fetchurl {
+            inherit (whisperLargeV3F16) sha256;
+            name = whisperLargeV3F16.filename;
+            url = "https://huggingface.co/${whisperLargeV3F16.repo}/resolve/${whisperLargeV3F16.revision}/${whisperLargeV3F16.filename}";
+          };
+
           handy = pkgs.rustPlatform.buildRustPackage {
             pname = "handy";
             inherit version;
@@ -93,7 +117,7 @@
 
             cargoRoot = "src-tauri";
             buildAndTestSubdir = "src-tauri";
-            tauriBundleType = "deb";
+            tauriBundleType = if pkgs.stdenv.hostPlatform.isDarwin then "app" else "deb";
 
             cargoLock = {
               lockFile = ./src-tauri/Cargo.lock;
@@ -105,7 +129,11 @@
             };
 
             postPatch = ''
-              ${pkgs.jq}/bin/jq '.bundle.createUpdaterArtifacts = false' \
+              ${pkgs.jq}/bin/jq '${
+                if pkgs.stdenv.hostPlatform.isDarwin
+                then ".bundle.createUpdaterArtifacts = false | .bundle.macOS.signingIdentity = null"
+                else ".bundle.createUpdaterArtifacts = false"
+              }' \
                 src-tauri/tauri.conf.json > $TMPDIR/tauri.conf.json
               cp $TMPDIR/tauri.conf.json src-tauri/tauri.conf.json
 
@@ -115,12 +143,14 @@
                 package.json > $TMPDIR/package.json
               cp $TMPDIR/package.json package.json
 
-              # Point libappindicator-sys to the Nix store path
-              substituteInPlace \
-                $cargoDepsCopy/libappindicator-sys-*/src/lib.rs \
-                --replace-fail \
-                  "libayatana-appindicator3.so.1" \
-                  "${pkgs.libayatana-appindicator}/lib/libayatana-appindicator3.so.1"
+              ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+                # Point libappindicator-sys to the Nix store path
+                substituteInPlace \
+                  $cargoDepsCopy/libappindicator-sys-*/src/lib.rs \
+                  --replace-fail \
+                    "libayatana-appindicator3.so.1" \
+                    "${pkgs.libayatana-appindicator}/lib/libayatana-appindicator3.so.1"
+              ''}
 
               # Disable cbindgen in ferrous-opencc (calls cargo metadata which fails in sandbox)
               # Upstream removed this call in v0.3.1+
@@ -141,7 +171,6 @@
             nativeBuildInputs = with pkgs; [
               cargo-tauri.hook
               pkg-config
-              wrapGAppsHook4
               bun
               # pkgs.bun2nix (from overlay), not the flake input — `with pkgs;`
               # doesn't shadow function arguments in Nix.
@@ -149,23 +178,62 @@
               jq
               cmake
               rustPlatform.bindgenHook
+            ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+              wrapGAppsHook4
               shaderc
+            ] ++ lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
+              swift
+              darwin.cctools
+              tauriXattrShim
             ];
 
             # Tests require runtime resources (audio devices, model files, GPU/Vulkan)
             # not available in the Nix build sandbox
             doCheck = false;
 
-            buildInputs = commonNativeDeps pkgs ++ (with pkgs; [
-              glib-networking
-              libx11
-            ]) ++ gstPlugins pkgs;
+            buildInputs = with pkgs; [
+              onnxruntime
+              openssl
+            ] ++ lib.optionals pkgs.stdenv.hostPlatform.isLinux (
+              linuxNativeDeps pkgs ++ [
+                glib-networking
+                libx11
+              ] ++ gstPlugins pkgs
+            );
 
-            env = commonEnv pkgs // {
+            env = {
+              ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
+              ORT_PREFER_DYNAMIC_LINK = "1";
               OPENSSL_NO_VENDOR = "1";
+            }
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux (commonEnv pkgs)
+            // lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+              # build.rs supports this override for non-Xcode Swift toolchains.
+              SWIFTC = "${pkgs.swift}/bin/swiftc";
+              # This deployment uses local Whisper, not FoundationModels.
+              HANDY_FORCE_AI_STUB = "1";
             };
 
-            preFixup = ''
+            postInstall = lib.optionalString pkgs.stdenv.hostPlatform.isDarwin ''
+              app="$out/Applications/Handy.app"
+              executable="$app/Contents/MacOS/handy"
+              frameworks="$app/Contents/Frameworks"
+              mkdir -p "$frameworks"
+              cp -L \
+                "${pkgs.onnxruntime}/lib/libonnxruntime.${pkgs.onnxruntime.version}.dylib" \
+                "$frameworks/libonnxruntime.dylib"
+              chmod u+w "$executable" "$frameworks/libonnxruntime.dylib"
+              install_name_tool \
+                -change \
+                "@rpath/libonnxruntime.${pkgs.onnxruntime.version}.dylib" \
+                "@executable_path/../Frameworks/libonnxruntime.dylib" \
+                "$executable"
+              install_name_tool \
+                -id "@rpath/libonnxruntime.dylib" \
+                "$frameworks/libonnxruntime.dylib"
+            '';
+
+            preFixup = lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
               gappsWrapperArgs+=(
                 --set WEBKIT_DISABLE_DMABUF_RENDERER 1
                 --set ALSA_PLUGIN_DIR "${combinedAlsaPlugins}"
@@ -205,6 +273,15 @@
           services.handy.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.handy;
         };
 
+      darwinModules.default =
+        { lib, pkgs, ... }:
+        {
+          imports = [ ./nix/darwin-module.nix ];
+          programs.handy.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.handy;
+          programs.handy.modelPackage =
+            lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.whisper-large-v3-f16;
+        };
+
       # Development shell for building from source
       devShells = forAllSystems (
         system:
@@ -214,13 +291,17 @@
           };
         in
         {
-          default = pkgs.mkShell {
-            buildInputs = commonNativeDeps pkgs ++ (with pkgs; [
+          default = pkgs.mkShell ({
+            buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux (linuxNativeDeps pkgs) ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin (with pkgs; [
+              swift
+              darwin.cctools
+            ]) ++ (with pkgs; [
               # Rust toolchain
               rustc
               cargo
               rust-analyzer
               clippy
+              rustfmt
               # Frontend
               nodejs
               bun
@@ -231,22 +312,25 @@
               cmake
             ]);
 
-            inherit (commonEnv pkgs)
-              ORT_LIB_LOCATION
-              ORT_PREFER_DYNAMIC_LINK
-              GST_PLUGIN_SYSTEM_PATH_1_0;
-
-            LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.libayatana-appindicator pkgs.onnxruntime pkgs.vulkan-loader ]}";
-
-            # Same as wrapGAppsHook4
-            XDG_DATA_DIRS = "${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:${pkgs.hicolor-icon-theme}/share";
+            ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
+            ORT_PREFER_DYNAMIC_LINK = "1";
 
             shellHook = ''
               echo "Handy development environment"
               bun install
               echo "Run 'bun run tauri dev' to start"
             '';
-          };
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            inherit (commonEnv pkgs) GST_PLUGIN_SYSTEM_PATH_1_0;
+            LD_LIBRARY_PATH = "${pkgs.lib.makeLibraryPath [ pkgs.libayatana-appindicator pkgs.onnxruntime pkgs.vulkan-loader ]}";
+            # Same as wrapGAppsHook4
+            XDG_DATA_DIRS = "${pkgs.gsettings-desktop-schemas}/share/gsettings-schemas/${pkgs.gsettings-desktop-schemas.name}:${pkgs.gtk3}/share/gsettings-schemas/${pkgs.gtk3.name}:${pkgs.hicolor-icon-theme}/share";
+          }
+          // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+            SWIFTC = "${pkgs.swift}/bin/swiftc";
+            HANDY_FORCE_AI_STUB = "1";
+          });
         }
       );
     };

@@ -1406,7 +1406,7 @@ pub async fn get_available_accelerators() -> crate::managers::transcription::Ava
 
 #[cfg(test)]
 mod tests {
-    use handy_keys::Hotkey;
+    use handy_keys::{Hotkey, Modifiers};
     use tauri_plugin_global_shortcut::Shortcut;
 
     #[test]
@@ -1422,5 +1422,17 @@ mod tests {
             assert!(key.parse::<Shortcut>().is_ok(), "Tauri rejected {key}");
             assert!(key.parse::<Hotkey>().is_ok(), "HandyKeys rejected {key}");
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn right_command_modifier_only_keeps_its_side() {
+        let right = "command_right".parse::<Hotkey>().unwrap();
+        let left = "command_left".parse::<Hotkey>().unwrap();
+
+        assert_eq!(right.modifiers, Modifiers::CMD_RIGHT);
+        assert_eq!(right.to_handy_string(), "command_right");
+        assert_eq!(left.modifiers, Modifiers::CMD_LEFT);
+        assert_ne!(right, left);
     }
 }
