@@ -34,8 +34,15 @@ let
       staging_app="$target_parent/.Handy.app.staging"
       previous_app="$target_parent/.Handy.app.previous"
       /bin/mkdir -p "$target_parent" "$model_target"
+      if [ -e "$staging_app" ]; then
+        /bin/chmod -R u+w "$staging_app"
+      fi
+      if [ -e "$previous_app" ]; then
+        /bin/chmod -R u+w "$previous_app"
+      fi
       /bin/rm -rf "$staging_app" "$previous_app"
       /usr/bin/ditto "$source_app" "$staging_app"
+      /bin/chmod -R u+w "$staging_app"
       /usr/bin/xattr -cr "$staging_app"
       /usr/bin/codesign --force --deep --sign "$signing_identity" "$staging_app"
       /usr/bin/codesign --verify --deep --strict "$staging_app"
