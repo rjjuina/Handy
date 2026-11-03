@@ -102,9 +102,11 @@ in
     ];
 
     system.activationScripts.postActivation.text = lib.mkAfter ''
+      # darwin-rebuild runs activation with HOME=~root, which sudo keeps;
+      # --set-home makes security/codesign search the user's login keychain.
       handy_uid=$(/usr/bin/id -u ${lib.escapeShellArg cfg.user})
       /bin/launchctl asuser "$handy_uid" \
-        /usr/bin/sudo --user=${lib.escapeShellArg cfg.user} -- \
+        /usr/bin/sudo --set-home --user=${lib.escapeShellArg cfg.user} -- \
         ${installHandy}/bin/install-handy-macos \
         ${lib.escapeShellArg "${cfg.package}/Applications/Handy.app"} \
         ${lib.escapeShellArg appPath} \
